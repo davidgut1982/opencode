@@ -1,57 +1,101 @@
 ---
-description: Canonical two-track development process — PLAN (grill) → BUILD → GATE. Use when starting any non-trivial task before writing code or making changes.
+description: Full 7-stage development process — Research → Architect → Implement → Code Critic → QA → Security → Documentation → Gate. Use at the start of any non-trivial task.
 ---
 
-# Dev Loop
+# Dev Loop — 7-Stage Process
 
-One loop, two tracks, three stages: **PLAN → BUILD → GATE.**
+Every non-trivial task follows this pipeline. Stages 3, 4, and 6 are never skippable. Others have skip conditions noted.
 
 ## Step 0: Pick the track
 
-Classify the task before doing anything:
+- **CODE track** — TypeScript features, bugfixes, refactors, Effect services. Goes through all 7 stages.
+- **CHANGE track** — config, docs, commands, agents, AGENTS.md edits. Skips stages 1–4; goes straight to verify-by-observation → Security (if touching auth/secrets) → Documentation → Gate.
 
-- **CODE track** — feature, bugfix, refactor, or any change to TypeScript/program logic that can be tested. Domain logic, API endpoints, validation flows, parsers, Effect services.
-- **CHANGE track** — config edits, ops/infra changes, deployment, docs, skill/command/agent edits. Not TDD-shaped; forcing tests here is theater.
+## Stage 1: Research (conditional)
 
-If genuinely mixed, split it: CODE part in CODE track, CHANGE part in CHANGE track.
+**Skip when:** you have explicit requirements, the task is a trivial single-file change, or the codebase area is already well-understood.
 
-## Stage 1: PLAN (both tracks) — grill first
+**Invoke:** switch to the `research` agent. Ask it to investigate and return a READY/BLOCKED verdict.
 
-Before any edit, stress-test the plan using the **grill-me** discipline (`/grill-me`):
+What it produces: relevant files, constraints, risks, recommended approach.
 
-- Interview relentlessly, **one question at a time**, walking down each branch of the decision tree.
-- For each question, **provide your recommended answer.**
-- If a question can be answered by exploring the codebase, **explore instead of asking.**
-- Resolve dependencies between decisions before moving on.
+## Stage 2: Architect (mandatory for non-trivial)
 
-Stop grilling when the plan has no unresolved forks. Do not start work with open questions.
+**Skip when:** trivial single-function change or config edit where the interface is obvious.
 
-## Stage 2: BUILD
+**Invoke:** switch to the `architect` agent. Give it the Research findings. Ask for a design artifact + APPROVED/NEEDS_IMPROVEMENT/BLOCKED verdict.
 
-### CODE track — vertical TDD (see `/tdd` for full mechanics)
+What it produces: interface contracts, module boundaries, data flow, edge cases, out-of-scope list.
 
-- **Vertical slices, never horizontal.** One `RED → GREEN → REFACTOR` cycle at a time.
-- **Integration tests through public interfaces.** Test *what* the system does, not *how*. Mock only at system boundaries (external APIs, DB, filesystem, time) — never your own collaborators.
-- **Behavior over implementation.** A test that breaks on a rename was testing the wrong thing.
-- **30-second interface plan** before writing: interface shape, which behaviors matter most, target module.
-- Run tests with `bun test` from the package dir (e.g. `packages/opencode`). Never from repo root.
-- Run `bun typecheck` to verify types before gating.
+Gate: do not proceed to Implementation until APPROVED.
 
-### CHANGE track — verify by observation
+## Stage 3: Implementation (never skip)
 
+Use the primary model (or invoke a specialized context if needed). Implement against the Architect's design artifact.
+
+Rules (CODE track):
+- **Vertical slices only.** One `RED → GREEN → REFACTOR` cycle at a time — see `/tdd`.
+- Integration tests through public interfaces. Mock only at system boundaries.
+- `bun test` from the package dir after each slice. Never from repo root.
+- `bun typecheck` before handing off to Code Critic.
+
+Rules (CHANGE track):
 - Make the change.
-- **Verify by direct observation, never assumption.** An unobserved result (empty output, exit 0 with no body, "should work") is *not* a pass — observe the actual artifact.
-- State the evidence inline: what you ran, what you saw.
+- Verify by direct observation — re-read the config value, check the service, read the log line.
+- An unobserved result is never a pass.
 
-## Stage 3: GATE
+## Stage 4: Code Critic (mandatory, blocking — never skip)
 
-Route the result through **no-mistakes** so nothing reaches the real remote unreviewed:
+**Invoke:** switch to the `code-critic` agent after every Implementation that modified TypeScript files.
 
-- `git push no-mistakes <branch>` runs review → test → docs → lint in a disposable worktree and opens a clean PR only when every check is green.
-- Act on findings: approve auto-fixes, decide the escalated ones.
+Give it: files modified, stated intent, any verification evidence you cited.
 
-**Graceful degradation:** if `no-mistakes` is not installed, fall back to small logical commits with descriptive messages + a manual PR. Never batch a large pile of work into one commit.
+It will re-run your verification commands independently. It returns APPROVE / WARN / BLOCK.
 
-## Why this exists
+Gate: do not proceed to QA until Code Critic returns APPROVE or WARN. On BLOCK, return to Implementation with findings. Maximum 3 cycles before escalating to user.
 
-Effort that never becomes reviewed, committed history is lost work. This loop makes "planned, built in the right track, gated into a clean PR" the path of least resistance.
+## Stage 5: QA (mandatory)
+
+**Invoke:** switch to the `qa` agent.
+
+It runs `bun test` and `bun typecheck` from the correct package dir and verifies runtime behavior where tests can't cover it. Returns QA PASSED / QA FAILED with verbatim evidence.
+
+Gate: do not proceed to Security until QA PASSED.
+
+## Stage 6: Security (mandatory, blocking — never skip)
+
+**Invoke:** switch to the `security` agent.
+
+It reviews auth/authz, secrets, injection surfaces, SSRF, deps, and runs a credential scan on the diff. Returns APPROVE / WARN / BLOCK.
+
+Gate: do not proceed to Documentation on BLOCK. On BLOCK, return to Implementation. On APPROVE or WARN, proceed.
+
+## Stage 7: Documentation (mandatory)
+
+**Invoke:** switch to the `documentation` agent.
+
+It updates UPCOMING_CHANGELOG.md, AGENTS.md (if a new convention was established), and any public API docs. Returns DOCUMENTATION COMPLETE or DOCUMENTATION SKIPPED with reason.
+
+## Gate: no-mistakes
+
+After Stage 7, run the gate:
+
+```
+git push no-mistakes <branch>
+```
+
+This runs review → test → docs → lint in a disposable worktree and opens a clean PR only when all checks pass.
+
+**Graceful degradation:** if `no-mistakes` is unavailable, fall back to small logical commits + manual PR. Use `/commit` which checks for no-mistakes automatically.
+
+## Skip audit
+
+When any non-skippable stage is skipped (Code Critic, Security), note it explicitly:
+
+```
+⚠️ Stage 4 (Code Critic) skipped: <reason>
+Files modified: <list>
+Risk: <what could be missed>
+```
+
+Three or more skips in one task → surface the cumulative review debt to the user.
