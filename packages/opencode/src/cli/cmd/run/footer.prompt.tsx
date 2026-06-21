@@ -250,10 +250,9 @@ export function RunPromptBody(props: {
   })
 
   return (
-    <box id="run-direct-footer-prompt" width="100%">
-      <box id="run-direct-footer-input-shell" paddingTop={1} paddingBottom={1} paddingRight={2}>
+    <box width="100%">
+      <box paddingTop={1} paddingBottom={1} paddingRight={2}>
         <textarea
-          id="run-direct-footer-composer"
           width="100%"
           minHeight={TEXTAREA_MIN_ROWS}
           maxHeight={TEXTAREA_MAX_ROWS}
@@ -337,7 +336,7 @@ export function createPromptState(input: PromptInput): PromptState {
   const resources = createMemo<Auto[]>(() => {
     return input.resources().map((item) => ({
       kind: "mention",
-      display: Locale.truncateMiddle(`@${item.name} (${item.uri})`, width()),
+      display: Locale.truncateMiddle(`${item.client === "axi" ? "✧ " : "◎ "}@${item.name} (${item.uri})`, width()),
       value: item.name,
       description: item.description,
       part: {

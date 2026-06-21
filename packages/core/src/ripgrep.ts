@@ -3,6 +3,7 @@ export * as Ripgrep from "./ripgrep"
 import { Context, Effect, Fiber, Layer, Schema, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import path from "path"
+import { LayerNode } from "./effect/layer-node"
 import { Entry, Match } from "./filesystem/schema"
 import { FSUtil } from "./fs-util"
 import { AppProcess, collectStream, waitForAbort } from "./process"
@@ -41,7 +42,7 @@ type RawMatchData = (typeof RawMatch.Type)["data"]
 
 export class Error extends Schema.TaggedErrorClass<Error>()("Ripgrep.Error", {
   message: Schema.String,
-  cause: Schema.optional(Schema.Defect),
+  cause: Schema.optional(Schema.Defect()),
 }) {}
 
 export class InvalidPatternError extends Schema.TaggedErrorClass<InvalidPatternError>()("Ripgrep.InvalidPatternError", {
@@ -56,6 +57,7 @@ export interface FindInput {
   readonly hidden?: boolean
   readonly follow?: boolean
   readonly signal?: AbortSignal
+  readonly onEntry?: (entry: Entry) => Effect.Effect<void>
 }
 
 export interface GlobInput {
@@ -102,6 +104,7 @@ export const layer = Layer.effect(
       readonly signal?: AbortSignal
       readonly parse: (line: string) => Effect.Effect<A | undefined, Error>
       readonly pattern?: string
+      readonly onItem?: (item: A) => Effect.Effect<void>
     }) => {
       const program = Effect.scoped(
         Effect.gen(function* () {
@@ -112,11 +115,16 @@ export const layer = Layer.effect(
             Effect.map((output) => output.buffer.toString("utf8")),
             Effect.forkScoped,
           )
+          let observed = 0
           const rows = yield* Stream.decodeText(handle.stdout).pipe(
             Stream.splitLines,
             Stream.filter((line) => line.length > 0),
             Stream.mapEffect(input.parse),
             Stream.filter((row): row is A => row !== undefined),
+            Stream.tap((row) => {
+              if (!input.onItem || observed++ >= input.limit) return Effect.void
+              return input.onItem(row)
+            }),
             Stream.take(input.limit + 1),
             Stream.runCollect,
             Effect.map((chunk) => [...chunk]),
@@ -154,10 +162,10 @@ export const layer = Layer.effect(
           args: [
             "--no-config",
             "--files",
-            "--glob=!**/.git/**",
             ...(input.hidden ? ["--hidden"] : []),
             ...(input.follow ? ["--follow"] : []),
             `--glob=${input.pattern}`,
+            "--glob=!**/.git/**",
             ".",
           ],
           parse: (line) =>
@@ -181,37 +189,35 @@ export const layer = Layer.effect(
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
         ),
       find: (input) =>
-        run<string>({
+        run<Entry>({
           cwd: input.cwd,
           limit: input.limit,
           signal: input.signal,
           args: [
             "--no-config",
             "--files",
-            "--glob=!**/.git/**",
             ...(input.hidden ? ["--hidden"] : []),
             ...(input.follow ? ["--follow"] : []),
-            `--glob=${input.pattern}`,
+            ...(input.pattern === "*" ? [] : [`--glob=${input.pattern}`]),
+            "--glob=!**/.git/**",
             ".",
           ],
-          parse: (line) =>
-            Effect.succeed(
-              line
-                .replace(/^(?:\.[\\/])+/u, "")
-                .replace(/^[\\/]+/u, "")
-                .replaceAll("\\", "/"),
-            ),
-        }).pipe(
-          Effect.map((result) =>
-            result.items.map((relative) => {
-              const absolute = path.resolve(input.cwd, relative)
-              return new Entry({
+          parse: (line) => {
+            const relative = line
+              .replace(/^(?:\.[\\/])+/u, "")
+              .replace(/^[\\/]+/u, "")
+              .replaceAll("\\", "/")
+            return Effect.succeed(
+              new Entry({
                 path: RelativePath.make(relative),
                 type: "file",
-                mime: FSUtil.mimeType(absolute),
-              })
-            }),
-          ),
+                mime: FSUtil.mimeType(path.resolve(input.cwd, relative)),
+              }),
+            )
+          },
+          onItem: input.onEntry,
+        }).pipe(
+          Effect.map((result) => result.items),
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
         ),
       grep: (input) =>
@@ -221,9 +227,9 @@ export const layer = Layer.effect(
             "--no-config",
             "--json",
             "--hidden",
-            "--glob=!**/.git/**",
             "--no-messages",
             ...(input.include ? [`--glob=${input.include}`] : []),
+            "--glob=!**/.git/**",
             "--",
             input.pattern,
             input.file ?? ".",
@@ -280,3 +286,4 @@ export const layer = Layer.effect(
 )
 
 export const defaultLayer = layer.pipe(Layer.provide(Layer.merge(RipgrepBinary.defaultLayer, AppProcess.defaultLayer)))
+export const node = LayerNode.make(layer, [RipgrepBinary.node, AppProcess.node])

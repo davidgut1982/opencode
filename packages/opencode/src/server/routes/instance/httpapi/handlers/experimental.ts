@@ -16,6 +16,10 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 import { ConsoleSwitchPayload, SessionListQuery, ToolListQuery, WorktreeApiError } from "../groups/experimental"
+import { readdir, stat } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join } from "node:path"
+import { McpCatalog } from "@/mcp/catalog"
 
 function mapWorktreeError<A, R>(self: Effect.Effect<A, Worktree.Error, R>) {
   return self.pipe(
@@ -35,6 +39,10 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     const sessions = yield* Session.Service
     const background = yield* BackgroundJob.Service
     const flags = yield* RuntimeFlags.Service
+
+    const capabilities = Effect.fn("ExperimentalHttpApi.capabilities")(function* () {
+      return { backgroundSubagents: flags.experimentalBackgroundSubagents }
+    })
 
     const getConsole = Effect.fn("ExperimentalHttpApi.console")(function* () {
       const [state, groups] = yield* Effect.all(
@@ -166,11 +174,55 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
       return promoted.some((job) => job !== undefined)
     })
 
+    /** Scan ~/.local/bin/ for AXI tools (*-axi executables) and return as McpResource entries. */
+    async function scanAxiTools(): Promise<
+      Record<string, { name: string; uri: string; description?: string; mimeType?: string; client: string }>
+    > {
+      const axiDir = join(homedir(), ".local", "bin")
+      let files: string[]
+      try {
+        files = await readdir(axiDir)
+      } catch {
+        return {}
+      }
+
+      const result: Record<
+        string,
+        { name: string; uri: string; description?: string; mimeType?: string; client: string }
+      > = {}
+
+      for (const file of files) {
+        if (!file.endsWith("-axi")) continue
+
+        const filePath = join(axiDir, file)
+        try {
+          const stats = await stat(filePath)
+          if (!stats.isFile()) continue
+        } catch {
+          continue
+        }
+
+        const key = McpCatalog.sanitize("axi") + ":" + McpCatalog.sanitize(file)
+        result[key] = {
+          name: file,
+          uri: `axi://${file}`,
+          client: "axi",
+          mimeType: "text/x-axi",
+        }
+      }
+
+      return result
+    }
+
     const resource = Effect.fn("ExperimentalHttpApi.resource")(function* () {
-      return yield* mcp.resources()
+      const [mcpResources, axiResources] = yield* Effect.all([mcp.resources(), Effect.promise(() => scanAxiTools())], {
+        concurrency: "unbounded",
+      })
+      return { ...mcpResources, ...axiResources }
     })
 
     return handlers
+      .handle("capabilities", capabilities)
       .handle("console", getConsole)
       .handle("consoleOrgs", listConsoleOrgs)
       .handle("consoleSwitch", switchConsole)
